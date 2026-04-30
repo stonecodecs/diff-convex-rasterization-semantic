@@ -22,6 +22,7 @@
 
 #include "backward.h"
 #include "auxiliary.h"
+#include "config.h"
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
 namespace cg = cooperative_groups;
@@ -172,6 +173,7 @@ __global__ void preprocessCUDA(
 	const int* radii,
 	const float* shs,
 	const bool* clamped,
+	const float* viewmatrix,
 	const float* proj,
 	const int* num_points_per_convex,
 	const int* cumsum_of_points_per_convex,
@@ -190,7 +192,8 @@ __global__ void preprocessCUDA(
 	float3* dL_dmean2D,
 	float* dL_dcov3D,
 	float* dL_dcolor,
-	float* dL_dsh)
+	float* dL_dsh,
+	const float* dL_ddepth)
 {
 	auto idx = cg::this_grid().thread_rank();
 	if (idx >= P || !(radii[idx] > 0))
@@ -272,6 +275,24 @@ __global__ void preprocessCUDA(
 
 	}
 
+	if (dL_ddepth != nullptr)
+	{
+		const float dd = dL_ddepth[idx];
+		if (dd != 0.0f)
+		{
+			const float inv_n = 1.0f / (float)num_points_per_convex[idx];
+			const float gx = viewmatrix[8] * dd * inv_n;
+			const float gy = viewmatrix[9] * dd * inv_n;
+			const float gz = viewmatrix[10] * dd * inv_n;
+			for (int i = 0; i < num_points_per_convex[idx]; i++)
+			{
+				dL_dconvex[cumsum_for_convex + i].x += gx;
+				dL_dconvex[cumsum_for_convex + i].y += gy;
+				dL_dconvex[cumsum_for_convex + i].z += gz;
+			}
+		}
+	}
+
 	// Compute gradient updates due to computing colors from SHs
 	if (shs)
 		computeColorFromSH(idx, D, M, (glm::vec3)(center_convex.x, center_convex.y, center_convex.z), *campos, shs, clamped, (glm::vec3*)dL_dcolor, (glm::vec3*)dL_dconvex, (glm::vec3*)dL_dsh, cumsum_for_convex, num_points_per_convex[idx]);
@@ -286,6 +307,7 @@ renderCUDA(
 	const uint32_t* __restrict__ point_list,
 	int W, int H,
 	const float* __restrict__ bg_color,
+	float bg_depth,
 	const float* __restrict__ delta,
 	const float* __restrict__ sigma,
 	const int* __restrict__ num_points_per_convex,
@@ -295,11 +317,17 @@ renderCUDA(
 	const int* __restrict__ num_points_per_convex_view,
 	const float4* __restrict__ conic_opacity,
 	const float* __restrict__ depths,
+	const float* __restrict__ semantics,
+	int S,
 	const float2* __restrict__ means2D,
 	const float* __restrict__ colors,
 	const float* __restrict__ final_Ts,
 	const uint32_t* __restrict__ n_contrib,
 	const float* __restrict__ dL_dpixels,
+	const float* __restrict__ dL_dout_depth,
+	const float* __restrict__ dL_dout_weight,
+	const float* __restrict__ dL_dout_sem,
+	float* __restrict__ dL_ddepth,
 	float2* __restrict__ dL_dnormals,
 	float* __restrict__ dL_doffsets,
 	float* __restrict__ dL_ddelta,
@@ -307,7 +335,8 @@ renderCUDA(
 	float3* __restrict__ dL_dmean2D,
 	float4* __restrict__ dL_dconic2D,
 	float* __restrict__ dL_dopacity,
-	float* __restrict__ dL_dcolors)
+	float* __restrict__ dL_dcolors,
+	float* __restrict__ dL_dsemantics)
 {
 	// We rasterize again. Compute necessary block info.
 	auto block = cg::this_thread_block();
@@ -363,6 +392,20 @@ renderCUDA(
 
 	float last_alpha = 0;
 	float last_color[C] = { 0 };
+	float accum_rec_depth = 0.f;
+	float last_depth = 0.f;
+	float accum_rec_w = 0.f;
+	float last_w = 0.f;
+	float accum_rec_sem[MAX_SEMANTIC_CHANNELS];
+	float last_sem[MAX_SEMANTIC_CHANNELS];
+	if (inside && S > 0)
+	{
+		for (int ch = 0; ch < S; ch++)
+		{
+			accum_rec_sem[ch] = 0.f;
+			last_sem[ch] = 0.f;
+		}
+	}
 
 	// Gradient of pixel coordinate w.r.t. normalized 
 	// screen-space viewport corrdinates (-1 to 1)
@@ -433,6 +476,10 @@ renderCUDA(
 			T = T / (1.f - alpha);
 			const float dchannel_dcolor = alpha * T;
 
+			float dL_ddepth_pix = 0.f;
+			if (dL_dout_depth != nullptr)
+				dL_ddepth_pix = dL_dout_depth[pix_id];
+
 			// Propagate gradients to per-Convex colors and keep
 			// gradients w.r.t. alpha (blending factor for a Convex/pixel
 			// pair).
@@ -452,6 +499,34 @@ renderCUDA(
 				// many that were affected by this Convex.
 				atomicAdd(&(dL_dcolors[global_id * C + ch]), dchannel_dcolor * dL_dchannel);
 			}
+			if (dL_dout_depth != nullptr)
+			{
+				accum_rec_depth = last_alpha * last_depth + (1.f - last_alpha) * accum_rec_depth;
+				const float z = collected_depths[j];
+				dL_dalpha += (z - accum_rec_depth) * dL_ddepth_pix;
+				last_depth = z;
+				atomicAdd(&(dL_ddepth[global_id]), dchannel_dcolor * dL_ddepth_pix);
+			}
+			if (dL_dout_weight != nullptr)
+			{
+				accum_rec_w = last_alpha * last_w + (1.f - last_alpha) * accum_rec_w;
+				const float w_val = 1.f;
+				const float dL_dw_pix = dL_dout_weight[pix_id];
+				dL_dalpha += (w_val - accum_rec_w) * dL_dw_pix;
+				last_w = w_val;
+			}
+			if (dL_dout_sem != nullptr && semantics != nullptr && S > 0)
+			{
+				for (int ch = 0; ch < S; ch++)
+				{
+					const float s = semantics[global_id * S + ch];
+					accum_rec_sem[ch] = last_alpha * last_sem[ch] + (1.f - last_alpha) * accum_rec_sem[ch];
+					const float dL_dsem_pix = dL_dout_sem[ch * H * W + pix_id];
+					dL_dalpha += (s - accum_rec_sem[ch]) * dL_dsem_pix;
+					last_sem[ch] = s;
+					atomicAdd(&(dL_dsemantics[global_id * S + ch]), dchannel_dcolor * dL_dsem_pix);
+				}
+			}
 			dL_dalpha *= T;
 			// Update last alpha (to be used in the next iteration)
 			last_alpha = alpha;
@@ -462,6 +537,8 @@ renderCUDA(
 			for (int i = 0; i < C; i++)
 				bg_dot_dpixel += bg_color[i] * dL_dpixel[i];
 			dL_dalpha += (-T_final / (1.f - alpha)) * bg_dot_dpixel;
+			if (dL_dout_depth != nullptr)
+				dL_dalpha += (-T_final / (1.f - alpha)) * bg_depth * dL_ddepth_pix;
 
 			// Helpful reusable temporary variables
 			const float dL_dC = con_o.w * dL_dalpha;
@@ -538,7 +615,8 @@ void BACKWARD::preprocess(
 	const float* dL_dconic,
 	float* dL_dcov3D,
 	float* dL_dcolor,
-	float* dL_dsh
+	float* dL_dsh,
+	const float* dL_ddepth
 	)
 {
 	
@@ -552,6 +630,7 @@ void BACKWARD::preprocess(
 		radii,
 		shs,
 		clamped,
+		viewmatrix,
 		projmatrix,
 		num_points_per_convex,
 		cumsum_of_points_per_convex,
@@ -570,7 +649,8 @@ void BACKWARD::preprocess(
 		(float3*)dL_dmean2D,
 		dL_dcov3D,
 		dL_dcolor,
-		dL_dsh);
+		dL_dsh,
+		dL_ddepth);
 }
 
 void BACKWARD::render(
@@ -579,6 +659,7 @@ void BACKWARD::render(
 	const uint32_t* point_list,
 	int W, int H,
 	const float* bg_color,
+	float bg_depth,
 	const float* delta,
 	const float* sigma,
 	const int* num_points_per_convex,
@@ -588,11 +669,17 @@ void BACKWARD::render(
 	const int* num_points_per_convex_view,
 	const float4* conic_opacity,
 	const float* depths,
+	const float* semantics,
+	int S,
 	const float2* means2D,
 	const float* colors,
 	const float* final_Ts,
 	const uint32_t* n_contrib,
 	const float* dL_dpixels,
+	const float* dL_dout_depth,
+	const float* dL_dout_weight,
+	const float* dL_dout_sem,
+	float* dL_ddepth,
 	float2* dL_dnormals,
 	float* dL_doffsets,
 	float* dL_ddelta,
@@ -600,13 +687,15 @@ void BACKWARD::render(
 	float3* dL_dmean2D,
 	float4* dL_dconic2D,
 	float* dL_dopacity,
-	float* dL_dcolors)
+	float* dL_dcolors,
+	float* dL_dsemantics)
 {
 	renderCUDA<NUM_CHANNELS> << <grid, block >> >(
 		ranges,
 		point_list,
 		W, H,
 		bg_color,
+		bg_depth,
 		delta,
 		sigma,
 		num_points_per_convex,
@@ -616,11 +705,17 @@ void BACKWARD::render(
 		num_points_per_convex_view,
 		conic_opacity,
 		depths,
+		semantics,
+		S,
 		means2D,
 		colors,
 		final_Ts,
 		n_contrib,
 		dL_dpixels,
+		dL_dout_depth,
+		dL_dout_weight,
+		dL_dout_sem,
+		dL_ddepth,
 		dL_dnormals,
 		dL_doffsets,
 		dL_ddelta,
@@ -628,6 +723,7 @@ void BACKWARD::render(
 		dL_dmean2D,
 		dL_dconic2D,
 		dL_dopacity,
-		dL_dcolors
+		dL_dcolors,
+		dL_dsemantics
 		);
 }

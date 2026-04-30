@@ -38,6 +38,7 @@ def rasterize_convexes(
     number_of_points,
     sh,
     colors_precomp,
+    semantics,
     opacities,
     means2D,
     scaling,
@@ -53,6 +54,7 @@ def rasterize_convexes(
         number_of_points,
         sh,
         colors_precomp,
+        semantics,
         opacities,
         means2D,
         scaling,
@@ -69,9 +71,10 @@ class _RasterizeConvexes(torch.autograd.Function):
         sigma,
         num_points_per_convex,
         cumsum_of_points_per_convex,
-        number_of_points,
+        number_of_points,  # number of primitives!
         sh,
         colors_precomp,
+        semantics,
         opacities,
         means2D,
         scaling,
@@ -88,6 +91,7 @@ class _RasterizeConvexes(torch.autograd.Function):
             num_points_per_convex,
             cumsum_of_points_per_convex,
             colors_precomp,
+            semantics,
             opacities,
             scaling,
             density_factor,
@@ -102,6 +106,7 @@ class _RasterizeConvexes(torch.autograd.Function):
             raster_settings.sh_degree,
             raster_settings.campos,
             raster_settings.prefiltered,
+            raster_settings.bg_depth,
             raster_settings.debug
         )
 
@@ -109,29 +114,41 @@ class _RasterizeConvexes(torch.autograd.Function):
         if raster_settings.debug:
             cpu_args = cpu_deep_copy_tuple(args) # Copy them before they can be corrupted
             try:
-                num_rendered, color, depth, radii, geomBuffer, binningBuffer, imgBuffer, scaling, density_factor = _C.rasterize_convexes(*args)
+                num_rendered, color, allmap, radii, geomBuffer, binningBuffer, imgBuffer, scaling, density_factor = _C.rasterize_convexes(*args)
             except Exception as ex:
                 torch.save(cpu_args, "snapshot_fw.dump")
                 print("\nAn error occured in forward. Please forward snapshot_fw.dump for debugging.")
                 raise ex
         else:
-            num_rendered, color, depth, radii, geomBuffer, binningBuffer, imgBuffer, scaling, density_factor = _C.rasterize_convexes(*args)
+            num_rendered, color, allmap, radii, geomBuffer, binningBuffer, imgBuffer, scaling, density_factor = _C.rasterize_convexes(*args)
 
         # Keep relevant tensors for backward
         ctx.raster_settings = raster_settings
         ctx.num_rendered = num_rendered
         ctx.number_of_points = number_of_points
-        ctx.save_for_backward(convex_points, delta, sigma, num_points_per_convex, cumsum_of_points_per_convex, colors_precomp, radii, sh, geomBuffer, binningBuffer, imgBuffer)
-        return color, radii, scaling, density_factor, depth
+        ctx.num_semantic_channels = int(semantics.shape[1]) if semantics.ndim == 2 else 0
+        ctx.save_for_backward(convex_points, delta, sigma, num_points_per_convex, cumsum_of_points_per_convex, colors_precomp, semantics, radii, sh, geomBuffer, binningBuffer, imgBuffer)
+        return color, radii, scaling, density_factor, allmap
 
     @staticmethod
-    def backward(ctx, grad_out_color, _, __, ___, ____):
+    def backward(ctx, grad_out_color, _, __, ___, grad_out_allmap):
 
         # Restore necessary values from context
         num_rendered = ctx.num_rendered
         raster_settings = ctx.raster_settings
         number_of_points = ctx.number_of_points
-        convex_points, delta, sigma, num_points_per_convex, cumsum_of_points_per_convex, colors_precomp, radii, sh, geomBuffer, binningBuffer, imgBuffer = ctx.saved_tensors
+        S = ctx.num_semantic_channels
+        H, W = raster_settings.image_height, raster_settings.image_width
+        convex_points, delta, sigma, num_points_per_convex, cumsum_of_points_per_convex, colors_precomp, semantics, radii, sh, geomBuffer, binningBuffer, imgBuffer = ctx.saved_tensors
+
+        if grad_out_allmap is None:
+            grad_out_allmap = torch.zeros((2 + S, H, W), dtype=grad_out_color.dtype, device=grad_out_color.device)
+        grad_out_depth = grad_out_allmap[0:1]
+        grad_out_weight = grad_out_allmap[1:2]
+        if S > 0:
+            grad_out_sem = grad_out_allmap[2:2 + S]
+        else:
+            grad_out_sem = torch.empty((0, H, W), dtype=grad_out_color.dtype, device=grad_out_color.device)
 
         # Restructure args as C++ method expects them
         args = (raster_settings.bg,
@@ -148,6 +165,10 @@ class _RasterizeConvexes(torch.autograd.Function):
                 raster_settings.tanfovx, 
                 raster_settings.tanfovy, 
                 grad_out_color, 
+                grad_out_depth,
+                grad_out_weight,
+                grad_out_sem,
+                raster_settings.bg_depth,
                 sh, 
                 raster_settings.sh_degree, 
                 raster_settings.campos,
@@ -155,19 +176,20 @@ class _RasterizeConvexes(torch.autograd.Function):
                 num_rendered,
                 binningBuffer,
                 imgBuffer,
+                semantics,
                 raster_settings.debug)
 
         # Compute gradients for relevant tensors by invoking backward method
         if raster_settings.debug:
             cpu_args = cpu_deep_copy_tuple(args) # Copy them before they can be corrupted
             try:
-                grad_convex, grad_delta, grad_sigma, grad_colors_precomp, grad_opacities, grad_sh, grad_means2D = _C.rasterize_convexes_backward(*args)
+                grad_convex, grad_delta, grad_sigma, grad_colors_precomp, grad_opacities, grad_sh, grad_means2D, grad_semantics = _C.rasterize_convexes_backward(*args)
             except Exception as ex:
                 torch.save(cpu_args, "snapshot_bw.dump")
                 print("\nAn error occured in backward. Writing snapshot_bw.dump for debugging.\n")
                 raise ex
         else:
-             grad_convex, grad_delta, grad_sigma, grad_colors_precomp, grad_opacities, grad_sh, grad_means2D = _C.rasterize_convexes_backward(*args)
+             grad_convex, grad_delta, grad_sigma, grad_colors_precomp, grad_opacities, grad_sh, grad_means2D, grad_semantics = _C.rasterize_convexes_backward(*args)
 
 
         #print(torch.max(torch.abs(grad_convex)), torch.min(torch.abs(grad_convex)))
@@ -187,6 +209,7 @@ class _RasterizeConvexes(torch.autograd.Function):
             None,
             grad_sh,
             grad_colors_precomp,
+            grad_semantics,
             grad_opacities,
             grad_means2D,
             None,
@@ -209,6 +232,7 @@ class ConvexRasterizationSettings(NamedTuple):
     campos : torch.Tensor
     prefiltered : bool
     debug : bool
+    bg_depth : float
 
 class ConvexRasterizer(nn.Module):
     def __init__(self, raster_settings):
@@ -226,7 +250,7 @@ class ConvexRasterizer(nn.Module):
             
         return visible
 
-    def forward(self, convex_points, delta, sigma, num_points_per_convex, cumsum_of_points_per_convex, number_of_points, opacities, means2D, scaling, density_factor,  shs = None, colors_precomp = None):
+    def forward(self, convex_points, delta, sigma, num_points_per_convex, cumsum_of_points_per_convex, number_of_points, opacities, means2D, scaling, density_factor,  shs = None, colors_precomp = None, semantics = None):
         
         raster_settings = self.raster_settings
 
@@ -237,6 +261,8 @@ class ConvexRasterizer(nn.Module):
             shs = torch.Tensor([])
         if colors_precomp is None:
             colors_precomp = torch.Tensor([])
+        if semantics is None:
+            semantics = torch.zeros((number_of_points, 0), dtype=convex_points.dtype, device=convex_points.device)
 
         # Invoke C++/CUDA rasterization routine
         return rasterize_convexes(
@@ -248,6 +274,7 @@ class ConvexRasterizer(nn.Module):
             number_of_points,
             shs,
             colors_precomp,
+            semantics,
             opacities,
             means2D,
             scaling,

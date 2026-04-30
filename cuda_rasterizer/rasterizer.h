@@ -54,6 +54,8 @@ namespace CudaRasterizer
 			const int total_nb_points,
 			const float* shs,
 			const float* colors_precomp,
+			const float* semantics,
+			const int num_semantic_channels,
 			const float* opacities,
 			float* scaling,
 			float* density_factor,
@@ -62,6 +64,7 @@ namespace CudaRasterizer
 			const float* cam_pos,
 			const float tan_fovx, float tan_fovy,
 			const bool prefiltered,
+			float bg_depth,
 			float* out_color,
 			float* out_others,
 			int* radii = nullptr,
@@ -70,6 +73,7 @@ namespace CudaRasterizer
 		static void backward(
 			const int P, int D, int M, int R,
 			const float* background,
+			float bg_depth,
 			const int width, int height,
 			const float* convex_points,
 			const float* delta,
@@ -79,6 +83,7 @@ namespace CudaRasterizer
 			const int total_nb_points,
 			const float* shs,
 			const float* colors_precomp,
+			const float* semantics,
 			const float* viewmatrix,
 			const float* projmatrix,
 			const float* campos,
@@ -88,6 +93,11 @@ namespace CudaRasterizer
 			char* binning_buffer,
 			char* image_buffer,
 			const float* dL_dpix,
+			const float* dL_dout_depth,
+			const float* dL_dout_weight,
+			const float* dL_dout_sem,
+			int num_semantic_channels,
+			float* dL_ddepth,
 			float* dL_dmeans3D,
 			float* dL_dmeans2D,
 			float* dL_dcov3D,
@@ -100,6 +110,7 @@ namespace CudaRasterizer
 			float* dL_dopacity,
 			float* dL_dcolor,
 			float* dL_dsh,
+			float* dL_dsemantics,
 			bool debug);
 	};
 };

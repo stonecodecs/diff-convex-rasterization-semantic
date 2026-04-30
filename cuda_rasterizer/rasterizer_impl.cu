@@ -231,6 +231,8 @@ int CudaRasterizer::Rasterizer::forward(
 	const int total_nb_points,
 	const float* shs,
 	const float* colors_precomp,
+	const float* semantics,
+	const int num_semantic_channels,
 	const float* opacities,
 	float* scaling,
 	float* density_factor,
@@ -239,6 +241,7 @@ int CudaRasterizer::Rasterizer::forward(
 	const float* cam_pos,
 	const float tan_fovx, float tan_fovy,
 	const bool prefiltered,
+	float bg_depth,
 	float* out_color,
 	float* out_others,
 	int* radii,
@@ -361,6 +364,7 @@ int CudaRasterizer::Rasterizer::forward(
 		imgState.ranges,
 		binningState.point_list,
 		width, height,
+		num_semantic_channels,
 		geomState.normals,
 		geomState.offsets,
 		geomState.num_points_per_convex_view,
@@ -372,9 +376,11 @@ int CudaRasterizer::Rasterizer::forward(
 		feature_ptr,
 		geomState.conic_opacity,
 		geomState.depths,
+		semantics,
 		imgState.accum_alpha,
 		imgState.n_contrib,
 		background,
+		bg_depth,
 		out_color,
 		out_others), debug)
 
@@ -386,6 +392,7 @@ int CudaRasterizer::Rasterizer::forward(
 void CudaRasterizer::Rasterizer::backward(
 	const int P, int D, int M, int R,
 	const float* background,
+	float bg_depth,
 	const int width, int height,
 	const float* convex_points,
 	const float* delta,
@@ -395,6 +402,7 @@ void CudaRasterizer::Rasterizer::backward(
 	const int total_nb_points,
 	const float* shs,
 	const float* colors_precomp,
+	const float* semantics,
 	const float* viewmatrix,
 	const float* projmatrix,
 	const float* campos,
@@ -404,6 +412,11 @@ void CudaRasterizer::Rasterizer::backward(
 	char* binning_buffer,
 	char* img_buffer,
 	const float* dL_dpix,
+	const float* dL_dout_depth,
+	const float* dL_dout_weight,
+	const float* dL_dout_sem,
+	int num_semantic_channels,
+	float* dL_ddepth,
 	float* dL_dmeans3D,
 	float* dL_dmeans2D,
 	float* dL_dcov3D,
@@ -416,6 +429,7 @@ void CudaRasterizer::Rasterizer::backward(
 	float* dL_dopacity,
 	float* dL_dcolor,
 	float* dL_dsh,
+	float* dL_dsemantics,
 	bool debug)
 {
 	GeometryState geomState = GeometryState::fromChunk(geom_buffer, P, total_nb_points);
@@ -444,6 +458,7 @@ void CudaRasterizer::Rasterizer::backward(
 		binningState.point_list,
 		width, height,
 		background,
+		bg_depth,
 		delta, 
 		sigma,
 		num_points_per_convex,
@@ -453,11 +468,17 @@ void CudaRasterizer::Rasterizer::backward(
 		geomState.num_points_per_convex_view,
 		geomState.conic_opacity,
 		geomState.depths,
+		semantics,
+		num_semantic_channels,
 		geomState.means2D,
 		color_ptr,
 		imgState.accum_alpha,
 		imgState.n_contrib,
 		dL_dpix,
+		dL_dout_depth,
+		dL_dout_weight,
+		dL_dout_sem,
+		dL_ddepth,
 		(float2*)dL_dnormals,
 		dL_doffsets,
 		dL_ddelta,
@@ -465,7 +486,8 @@ void CudaRasterizer::Rasterizer::backward(
 		(float3*)dL_dmeans2D,
 		(float4*)dL_dconic,
 		dL_dopacity,
-		dL_dcolor), debug)
+		dL_dcolor,
+		dL_dsemantics), debug)
 
 	// Take care of the rest of preprocessing. Was the precomputed covariance
 	// given to us or a scales/rot pair? If precomputed, pass that. If not,
@@ -499,6 +521,7 @@ void CudaRasterizer::Rasterizer::backward(
 		dL_dconic,
 		dL_dcov3D,
 		dL_dcolor,
-		dL_dsh
+		dL_dsh,
+		dL_ddepth
 		), debug)
 }

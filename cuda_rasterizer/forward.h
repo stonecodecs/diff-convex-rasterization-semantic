@@ -75,6 +75,7 @@ namespace FORWARD
 		const uint2* ranges,
 		const uint32_t* point_list,
 		int W, int H,
+		int S,
 		const float2* normals,
 		const float* offsets,
 		const int* num_points_per_convex_view,
@@ -86,9 +87,11 @@ namespace FORWARD
 		const float* features,
 		const float4* conic_opacity,
 		const float* depths,
+		const float* semantics,
 		float* final_T,
 		uint32_t* n_contrib,
 		const float* bg_color,
+		float bg_depth,
 		float* out_color,
 		float* out_others);
 }

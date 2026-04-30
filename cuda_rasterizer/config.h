@@ -29,4 +29,7 @@
 
 #define MAX_NB_POINTS 8
 
+// Max semantic channels (S_MAX)
+#define MAX_SEMANTIC_CHANNELS 32
+
 #endif

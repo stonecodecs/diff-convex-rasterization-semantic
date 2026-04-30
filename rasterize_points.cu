@@ -52,6 +52,7 @@ RasterizeConvexesCUDA(
 	const torch::Tensor& num_points_per_convex,
 	const torch::Tensor& cumsum_of_points_per_convex,
     const torch::Tensor& colors,
+    const torch::Tensor& semantics,
     const torch::Tensor& opacity,
 	torch::Tensor& scaling,
 	torch::Tensor& density_factor,
@@ -66,6 +67,7 @@ RasterizeConvexesCUDA(
 	const int degree,
 	const torch::Tensor& campos,
 	const bool prefiltered,
+	float bg_depth,
 	const bool debug)
 {
     
@@ -88,7 +90,19 @@ RasterizeConvexesCUDA(
   std::function<char*(size_t)> binningFunc = resizeFunctional(binningBuffer);
   std::function<char*(size_t)> imgFunc = resizeFunctional(imgBuffer);
 
-  torch::Tensor out_others = torch::full({3+3+1, H, W}, 0.0, float_opts);
+  int S = 0;
+  const float* semantics_ptr = nullptr;
+  if (semantics.defined() && semantics.numel() > 0)
+  {
+	  if (semantics.dim() != 2 || semantics.size(0) != P)
+		  throw std::runtime_error("semantics must be shape [P, S] with P = number_of_points");
+	  S = (int)semantics.size(1);
+	  if (S > MAX_SEMANTIC_CHANNELS)
+		  throw std::runtime_error("semantics.size(1) exceeds MAX_SEMANTIC_CHANNELS");
+	  semantics_ptr = semantics.contiguous().data_ptr<float>();
+  }
+
+  torch::Tensor out_others = torch::full({2 + S, H, W}, 0.0, float_opts);
 
 
   const int total_nb_points = num_points_per_convex[P-1].item<int>() + cumsum_of_points_per_convex[P-1].item<int>();
@@ -117,6 +131,8 @@ RasterizeConvexesCUDA(
 		total_nb_points,
 		sh.contiguous().data_ptr<float>(),
 		colors.contiguous().data_ptr<float>(), 
+		semantics_ptr,
+		S,
 		opacity.contiguous().data_ptr<float>(), 
 		scaling.contiguous().data_ptr<float>(), 
 		density_factor.contiguous().data_ptr<float>(), 
@@ -126,6 +142,7 @@ RasterizeConvexesCUDA(
 		tan_fovx,
 		tan_fovy,
 		prefiltered,
+		bg_depth,
 		out_color.contiguous().data_ptr<float>(),
 		out_others.contiguous().data_ptr<float>(),
 		radii.contiguous().data_ptr<int>(),
@@ -134,7 +151,7 @@ RasterizeConvexesCUDA(
   return std::make_tuple(rendered, out_color, out_others, radii, geomBuffer, binningBuffer, imgBuffer, scaling, density_factor);
 }
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
  RasterizeConvexesBackwardCUDA(
  	const torch::Tensor& background,
 	const torch::Tensor& convex_points,
@@ -150,6 +167,10 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	const float tan_fovx,
 	const float tan_fovy,
     const torch::Tensor& dL_dout_color,
+	const torch::Tensor& dL_dout_depth,
+	const torch::Tensor& dL_dout_alpha,
+	const torch::Tensor& dL_dout_semantics,
+	float bg_depth,
 	const torch::Tensor& sh,
 	const int degree,
 	const torch::Tensor& campos,
@@ -157,6 +178,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	const int R,
 	const torch::Tensor& binningBuffer,
 	const torch::Tensor& imageBuffer,
+	const torch::Tensor& semantics,
 	const bool debug) 
 {
   const int P = number_of_points;
@@ -170,6 +192,18 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
   }
 
   const int total_nb_points = num_points_per_convex[P-1].item<int>() + cumsum_of_points_per_convex[P-1].item<int>();
+
+  int S = 0;
+  const float* semantics_ptr = nullptr;
+  if (semantics.defined() && semantics.numel() > 0)
+  {
+	  if (semantics.dim() != 2 || semantics.size(0) != P)
+		  throw std::runtime_error("semantics must be shape [P, S] with P = number_of_points");
+	  S = (int)semantics.size(1);
+	  if (S > MAX_SEMANTIC_CHANNELS)
+		  throw std::runtime_error("semantics.size(1) exceeds MAX_SEMANTIC_CHANNELS");
+	  semantics_ptr = semantics.contiguous().data_ptr<float>();
+  }
 
   torch::Tensor dL_dconvex = torch::zeros({total_nb_points, 3}, convex_points.options());
   torch::Tensor dL_ddelta = torch::zeros({P}, convex_points.options());
@@ -185,11 +219,35 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
   torch::Tensor dL_dmeans3D = torch::zeros({P, 3}, convex_points.options());
   torch::Tensor dL_dmeans2D = torch::zeros({P, 3}, convex_points.options());
   torch::Tensor dL_dcov3D = torch::zeros({P, 6}, convex_points.options());
+  torch::Tensor dL_ddepth = torch::zeros({P}, convex_points.options());
+  torch::Tensor dL_dsemantics = (S > 0)
+	  ? torch::zeros({P, S}, convex_points.options())
+	  : torch::zeros({P, 0}, convex_points.options());
+
+  const float* dL_dout_depth_ptr = nullptr;
+  if (dL_dout_depth.numel() > 0)
+	  dL_dout_depth_ptr = dL_dout_depth.contiguous().data_ptr<float>();
+
+  const float* dL_dout_weight_ptr = nullptr;
+  if (dL_dout_alpha.numel() > 0)
+	  dL_dout_weight_ptr = dL_dout_alpha.contiguous().data_ptr<float>();
+
+  const float* dL_dout_sem_ptr = nullptr;
+  if (dL_dout_semantics.numel() > 0 && S > 0)
+  {
+	  if (dL_dout_semantics.dim() != 3 || dL_dout_semantics.size(0) != S ||
+		  dL_dout_semantics.size(1) != H || dL_dout_semantics.size(2) != W)
+		  throw std::runtime_error("dL_dout_semantics must be [S, H, W]");
+	  dL_dout_sem_ptr = dL_dout_semantics.contiguous().data_ptr<float>();
+  }
+
+  float* dL_dsemantics_ptr = (S > 0) ? dL_dsemantics.contiguous().data_ptr<float>() : nullptr;
   
   if(P != 0)
   {  
 	  CudaRasterizer::Rasterizer::backward(P, degree, M, R,
 	  background.contiguous().data_ptr<float>(),
+	  bg_depth,
 	  W, H, 
 	  convex_points.contiguous().data_ptr<float>(),
 	  delta.contiguous().data_ptr<float>(),
@@ -199,6 +257,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	  total_nb_points,
 	  sh.contiguous().data_ptr<float>(),
 	  colors.contiguous().data_ptr<float>(),
+	  semantics_ptr,
 	  viewmatrix.contiguous().data_ptr<float>(),
 	  projmatrix.contiguous().data_ptr<float>(),
 	  campos.contiguous().data_ptr<float>(),
@@ -209,6 +268,11 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	  reinterpret_cast<char*>(binningBuffer.contiguous().data_ptr()),
 	  reinterpret_cast<char*>(imageBuffer.contiguous().data_ptr()),
 	  dL_dout_color.contiguous().data_ptr<float>(),
+	  dL_dout_depth_ptr,
+	  dL_dout_weight_ptr,
+	  dL_dout_sem_ptr,
+	  S,
+	  dL_ddepth.contiguous().data_ptr<float>(),
 	  dL_dmeans3D.contiguous().data_ptr<float>(),
 	  dL_dmeans2D.contiguous().data_ptr<float>(),
 	  dL_dcov3D.contiguous().data_ptr<float>(),
@@ -221,10 +285,11 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	  dL_dopacity.contiguous().data_ptr<float>(),
 	  dL_dcolors.contiguous().data_ptr<float>(),
 	  dL_dsh.contiguous().data_ptr<float>(),
+	  dL_dsemantics_ptr,
 	  debug);
   }
 
-  return std::make_tuple(dL_dconvex, dL_ddelta, dL_dsigma, dL_dcolors, dL_dopacity, dL_dsh, dL_dmeans2D);
+  return std::make_tuple(dL_dconvex, dL_ddelta, dL_dsigma, dL_dcolors, dL_dopacity, dL_dsh, dL_dmeans2D, dL_dsemantics);
 }
 
 torch::Tensor markVisible(

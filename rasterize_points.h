@@ -35,6 +35,7 @@ RasterizeConvexesCUDA(
 	const torch::Tensor& num_points_per_convex,
 	const torch::Tensor& cumsum_of_points_per_convex,
     const torch::Tensor& colors,
+	const torch::Tensor& semantics,
     const torch::Tensor& opacity,
 	torch::Tensor& scaling,
 	torch::Tensor& density_factor,
@@ -49,9 +50,10 @@ RasterizeConvexesCUDA(
 	const int degree,
 	const torch::Tensor& campos,
 	const bool prefiltered,
+	float bg_depth,
 	const bool debug);
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
  RasterizeConvexesBackwardCUDA(
  	const torch::Tensor& background,
 	const torch::Tensor& convex_points,
@@ -67,6 +69,10 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	const float tan_fovx, 
 	const float tan_fovy,
     const torch::Tensor& dL_dout_color,
+	const torch::Tensor& dL_dout_depth,
+	const torch::Tensor& dL_dout_alpha,
+	const torch::Tensor& dL_dout_semantics,
+	float bg_depth,
 	const torch::Tensor& sh,
 	const int degree,
 	const torch::Tensor& campos,
@@ -74,6 +80,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	const int R,
 	const torch::Tensor& binningBuffer,
 	const torch::Tensor& imageBuffer,
+	const torch::Tensor& semantics,
 	const bool debug);
 		
 torch::Tensor markVisible(
