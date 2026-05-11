@@ -281,8 +281,9 @@ __global__ void preprocessCUDA(
 		if (dd != 0.0f)
 		{
 			const float inv_n = 1.0f / (float)num_points_per_convex[idx];
-			const float gx = viewmatrix[8] * dd * inv_n;
-			const float gy = viewmatrix[9] * dd * inv_n;
+			// Match transformPoint4x3: p_view.z uses row [2,6,10] (not column [8,9,10]).
+			const float gx = viewmatrix[2] * dd * inv_n;
+			const float gy = viewmatrix[6] * dd * inv_n;
 			const float gz = viewmatrix[10] * dd * inv_n;
 			for (int i = 0; i < num_points_per_convex[idx]; i++)
 			{
@@ -480,6 +481,8 @@ renderCUDA(
 			if (dL_dout_depth != nullptr)
 				dL_ddepth_pix = dL_dout_depth[pix_id];
 
+			float dL_ddepth_val = 0.0f;
+
 			// Propagate gradients to per-Convex colors and keep
 			// gradients w.r.t. alpha (blending factor for a Convex/pixel
 			// pair).
@@ -505,7 +508,7 @@ renderCUDA(
 				const float z = collected_depths[j];
 				dL_dalpha += (z - accum_rec_depth) * dL_ddepth_pix;
 				last_depth = z;
-				atomicAdd(&(dL_ddepth[global_id]), dchannel_dcolor * dL_ddepth_pix);
+				dL_ddepth_val += dchannel_dcolor * dL_ddepth_pix;
 			}
 			if (dL_dout_weight != nullptr)
 			{
@@ -543,41 +546,47 @@ renderCUDA(
 			// Helpful reusable temporary variables
 			const float dL_dC = con_o.w * dL_dalpha;
 
-			// Calculate gradients w.r.t sigma 
-            float dL_dsigma_value = -collected_depths[j] * phi_x * Cx * (1.0f - Cx) * dL_dC;   // remove depth here
-            atomicAdd(&(dL_dsigma[global_id]), dL_dsigma_value);
+			// Calculate gradients w.r.t sigma (depth scales the sigmoid argument; keep z in the chain rule)
+			float dL_dsigma_value = -collected_depths[j] * phi_x * Cx * (1.0f - Cx) * dL_dC;
+			atomicAdd(&(dL_dsigma[global_id]), dL_dsigma_value);
 
-			// Calculate gradient w.r.t phi_x 
-            float dL_dphi_x = -collected_sigma[j]  * collected_depths[j] * Cx * (1.0f - Cx) * dL_dC;  // remove depth here
+			// Calculate gradient w.r.t phi_x
+			float dL_dphi_x = -collected_sigma[j] * collected_depths[j] * Cx * (1.0f - Cx) * dL_dC;
 
-            // Calculate gradients with respect to distances
-            float dL_ddistances[MAX_NB_POINTS];
-            for (int k = 0; k < collected_num_points_per_convex_view[j]; k++) {
-                float exp_val = expf(collected_depths[j] * collected_delta[j] * (distances[k]-max_val));
-                dL_ddistances[k] = (exp_val / sum_exp) * dL_dphi_x * collected_delta[j] * collected_depths[j];
-            }
+			// Gradient w.r.t depth from Cx = 1 / (1 + exp(z * sigma * phi_x))
+			dL_ddepth_val += -collected_sigma[j] * phi_x * Cx * (1.0f - Cx) * dL_dC;
 
-			// Gradient with respect to delta
-			float dL_ddelta_value = 0.0f;
+			// Calculate gradients with respect to distances
+			float dL_ddistances[MAX_NB_POINTS];
 			for (int k = 0; k < collected_num_points_per_convex_view[j]; k++) {
-				float exp_val = expf(collected_delta[j] * collected_depths[j] * (distances[k]-max_val));	
-				dL_ddelta_value += collected_depths[j] * (distances[k]-max_val) * exp_val / sum_exp;
+				float exp_val = expf(collected_depths[j] * collected_delta[j] * (distances[k]-max_val));
+				dL_ddistances[k] = (exp_val / sum_exp) * dL_dphi_x * collected_delta[j] * collected_depths[j];
 			}
-			// Multiply by the chain rule term dL_dphi_x
+
+			// Gradient with respect to delta and inner log-sum-exp term for phi_x
+			float dL_ddelta_value = 0.0f;
+			float dL_ddepth_from_phi_term = 0.0f;
+			for (int k = 0; k < collected_num_points_per_convex_view[j]; k++) {
+				float exp_val = expf(collected_delta[j] * collected_depths[j] * (distances[k]-max_val));
+				dL_ddelta_value += collected_depths[j] * (distances[k]-max_val) * exp_val / sum_exp;
+				dL_ddepth_from_phi_term += collected_delta[j] * (distances[k]-max_val) * exp_val / sum_exp;
+			}
 			float dL_ddelta_value_aux = (collected_depths[j] * max_val + dL_ddelta_value) * dL_dphi_x;
 
-			// Apply the gradient update to delta
+			// Gradient w.r.t depth from phi_x = z * delta * max_val + log(sum_k exp(z * delta * (d_k - max)))
+			dL_ddepth_val += dL_dphi_x * (collected_delta[j] * max_val + dL_ddepth_from_phi_term);
+
 			atomicAdd(&(dL_ddelta[global_id]), dL_ddelta_value_aux);
+			atomicAdd(&(dL_ddepth[global_id]), dL_ddepth_val);
 
-
-            // Calculate gradients w.r.t normals and offsets
-            for (int k = 0; k < collected_num_points_per_convex_view[j]; k++) {
+			// Calculate gradients w.r.t normals and offsets
+			for (int k = 0; k < collected_num_points_per_convex_view[j]; k++) {
 				// Gradient w.r.t. nx and ny
 				atomicAdd(&(dL_dnormals[collected_cumsum_of_points_per_convex[j] + k].x), dL_ddistances[k] * pixf.x);
 				atomicAdd(&(dL_dnormals[collected_cumsum_of_points_per_convex[j] + k].y), dL_ddistances[k] * pixf.y);
 				// Gradient w.r.t. d
 				atomicAdd(&(dL_doffsets[collected_cumsum_of_points_per_convex[j] + k]), dL_ddistances[k]);
-            }
+			}
 
 			// Update gradients w.r.t. opacity of the Convex
 			atomicAdd(&(dL_dopacity[global_id]), dL_dalpha * Cx);
