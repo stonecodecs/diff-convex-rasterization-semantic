@@ -26,11 +26,11 @@ import os
 os.path.dirname(os.path.abspath(__file__))
 
 setup(
-    name="diff_convex_rasterization",
-    packages=['diff_convex_rasterization'],
+    name="diff_convex_rasterization_semantic",
+    packages=['diff_convex_rasterization_semantic'],
     ext_modules=[
         CUDAExtension(
-            name="diff_convex_rasterization._C",
+            name="diff_convex_rasterization_semantic._C",
             sources=[
             "cuda_rasterizer/rasterizer_impl.cu",
             "cuda_rasterizer/forward.cu",
