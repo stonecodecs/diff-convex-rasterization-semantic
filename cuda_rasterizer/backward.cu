@@ -318,7 +318,9 @@ renderCUDA(
 	const int* __restrict__ num_points_per_convex_view,
 	const float4* __restrict__ conic_opacity,
 	const float* __restrict__ depths,
+	const float* __restrict__ embeddings,
 	const float* __restrict__ semantics,
+	int E,
 	int S,
 	const float2* __restrict__ means2D,
 	const float* __restrict__ colors,
@@ -327,6 +329,7 @@ renderCUDA(
 	const float* __restrict__ dL_dpixels,
 	const float* __restrict__ dL_dout_depth,
 	const float* __restrict__ dL_dout_weight,
+	const float* __restrict__ dL_dout_embed,
 	const float* __restrict__ dL_dout_sem,
 	float* __restrict__ dL_ddepth,
 	float2* __restrict__ dL_dnormals,
@@ -337,6 +340,7 @@ renderCUDA(
 	float4* __restrict__ dL_dconic2D,
 	float* __restrict__ dL_dopacity,
 	float* __restrict__ dL_dcolors,
+	float* __restrict__ dL_dembeddings,
 	float* __restrict__ dL_dsemantics)
 {
 	// We rasterize again. Compute necessary block info.
@@ -397,8 +401,18 @@ renderCUDA(
 	float last_depth = 0.f;
 	float accum_rec_w = 0.f;
 	float last_w = 0.f;
+	float accum_rec_embed[MAX_EMBEDDING_CHANNELS];
+	float last_embed[MAX_EMBEDDING_CHANNELS];
 	float accum_rec_sem[MAX_SEMANTIC_CHANNELS];
 	float last_sem[MAX_SEMANTIC_CHANNELS];
+	if (inside && E > 0)
+	{
+		for (int ch = 0; ch < E; ch++)
+		{
+			accum_rec_embed[ch] = 0.f;
+			last_embed[ch] = 0.f;
+		}
+	}
 	if (inside && S > 0)
 	{
 		for (int ch = 0; ch < S; ch++)
@@ -517,6 +531,18 @@ renderCUDA(
 				const float dL_dw_pix = dL_dout_weight[pix_id];
 				dL_dalpha += (w_val - accum_rec_w) * dL_dw_pix;
 				last_w = w_val;
+			}
+			if (dL_dout_embed != nullptr && embeddings != nullptr && E > 0)
+			{
+				for (int ch = 0; ch < E; ch++)
+				{
+					const float e = embeddings[global_id * E + ch];
+					accum_rec_embed[ch] = last_alpha * last_embed[ch] + (1.f - last_alpha) * accum_rec_embed[ch];
+					const float dL_dembed_pix = dL_dout_embed[ch * H * W + pix_id];
+					dL_dalpha += (e - accum_rec_embed[ch]) * dL_dembed_pix;
+					last_embed[ch] = e;
+					atomicAdd(&(dL_dembeddings[global_id * E + ch]), dchannel_dcolor * dL_dembed_pix);
+				}
 			}
 			if (dL_dout_sem != nullptr && semantics != nullptr && S > 0)
 			{
@@ -678,7 +704,9 @@ void BACKWARD::render(
 	const int* num_points_per_convex_view,
 	const float4* conic_opacity,
 	const float* depths,
+	const float* embeddings,
 	const float* semantics,
+	int E,
 	int S,
 	const float2* means2D,
 	const float* colors,
@@ -687,6 +715,7 @@ void BACKWARD::render(
 	const float* dL_dpixels,
 	const float* dL_dout_depth,
 	const float* dL_dout_weight,
+	const float* dL_dout_embed,
 	const float* dL_dout_sem,
 	float* dL_ddepth,
 	float2* dL_dnormals,
@@ -697,6 +726,7 @@ void BACKWARD::render(
 	float4* dL_dconic2D,
 	float* dL_dopacity,
 	float* dL_dcolors,
+	float* dL_dembeddings,
 	float* dL_dsemantics)
 {
 	renderCUDA<NUM_CHANNELS> << <grid, block >> >(
@@ -714,7 +744,9 @@ void BACKWARD::render(
 		num_points_per_convex_view,
 		conic_opacity,
 		depths,
+		embeddings,
 		semantics,
+		E,
 		S,
 		means2D,
 		colors,
@@ -723,6 +755,7 @@ void BACKWARD::render(
 		dL_dpixels,
 		dL_dout_depth,
 		dL_dout_weight,
+		dL_dout_embed,
 		dL_dout_sem,
 		dL_ddepth,
 		dL_dnormals,
@@ -733,6 +766,7 @@ void BACKWARD::render(
 		dL_dconic2D,
 		dL_dopacity,
 		dL_dcolors,
+		dL_dembeddings,
 		dL_dsemantics
 		);
 }

@@ -361,7 +361,7 @@ __global__ void __launch_bounds__(BLOCK_X * BLOCK_Y)
 renderCUDA(
 	const uint2* __restrict__ ranges,
 	const uint32_t* __restrict__ point_list,
-	int W, int H, int S,
+	int W, int H, int E, int S,
 	const float2* __restrict__ normals,
 	const float* __restrict__ offsets,
 	const int* __restrict__ num_points_per_convex_view,
@@ -373,6 +373,7 @@ renderCUDA(
 	const float* __restrict__ features,
 	const float4* __restrict__ conic_opacity,
 	const float* __restrict__ depths,
+	const float* __restrict__ embeddings,
 	const float* __restrict__ semantics,
 	float* __restrict__ final_T,
 	uint32_t* __restrict__ n_contrib,
@@ -425,6 +426,7 @@ renderCUDA(
 	float C[CHANNELS] = { 0 };
 	float Dacc = 0.0f;
 	float weight = 0.0f;
+	float Eacc[MAX_EMBEDDING_CHANNELS] = { 0 };
 	float Sacc[MAX_SEMANTIC_CHANNELS] = { 0 };
 
 	// Iterate over batches until all done or range is complete
@@ -499,6 +501,13 @@ renderCUDA(
 			const float z_view = collected_depths[j];
 			Dacc += z_view * alpha * T;
 
+			// same with 6D embedding maps (if provided)
+			if (E > 0 && embeddings != nullptr)
+			{
+				for (int ch = 0; ch < E; ch++)
+					Eacc[ch] += embeddings[collected_id[j] * E + ch] * alpha * T;
+			}
+
 			// same with semantic maps (if provided)
 			if (S > 0 && semantics != nullptr)
 			{
@@ -525,8 +534,10 @@ renderCUDA(
 			out_color[ch * H * W + pix_id] = C[ch] + T * bg_color[ch];
 		out_others[0 * H * W + pix_id] = Dacc + T * bg_depth;
 		out_others[1 * H * W + pix_id] = weight;
+		for (int ch = 0; ch < E; ch++)
+			out_others[(2 + ch) * H * W + pix_id] = Eacc[ch];
 		for (int ch = 0; ch < S; ch++)
-			out_others[(2 + ch) * H * W + pix_id] = Sacc[ch];
+			out_others[(2 + E + ch) * H * W + pix_id] = Sacc[ch];
 	}
 }
 
@@ -534,7 +545,7 @@ void FORWARD::render(
 	const dim3 grid, dim3 block,
 	const uint2* ranges,
 	const uint32_t* point_list,
-	int W, int H, int S,
+	int W, int H, int E, int S,
 	const float2* normals,
 	const float* offsets,
 	const int* num_points_per_convex_view,
@@ -546,6 +557,7 @@ void FORWARD::render(
 	const float* colors,
 	const float4* conic_opacity,
 	const float* depths,
+	const float* embeddings,
 	const float* semantics,
 	float* final_T,
 	uint32_t* n_contrib,
@@ -557,7 +569,7 @@ void FORWARD::render(
 	renderCUDA<NUM_CHANNELS> << <grid, block >> > (
 		ranges,
 		point_list,
-		W, H, S,
+		W, H, E, S,
 		normals,
 		offsets,
 		num_points_per_convex_view,
@@ -569,6 +581,7 @@ void FORWARD::render(
 		colors,
 		conic_opacity,
 		depths,
+		embeddings,
 		semantics,
 		final_T,
 		n_contrib,

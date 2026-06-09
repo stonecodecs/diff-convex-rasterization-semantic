@@ -32,4 +32,8 @@
 // Max semantic channels (S_MAX)
 #define MAX_SEMANTIC_CHANNELS 32
 
+// 6D embedding channels (fixed)
+#define NUM_EMBEDDING_CHANNELS 6
+#define MAX_EMBEDDING_CHANNELS 6
+
 #endif

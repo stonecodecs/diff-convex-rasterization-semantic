@@ -47,7 +47,9 @@ namespace BACKWARD
 		const int* num_points_per_convex_view,
 		const float4* conic_opacity,
 		const float* depths,
+		const float* embeddings,
 		const float* semantics,
+		int E,
 		int S,
 		const float2* means2D,
 		const float* colors,
@@ -56,6 +58,7 @@ namespace BACKWARD
 		const float* dL_dpixels,
 		const float* dL_dout_depth,
 		const float* dL_dout_weight,
+		const float* dL_dout_embed,
 		const float* dL_dout_sem,
 		float* dL_ddepth,
 		float2* dL_dnormals,
@@ -66,6 +69,7 @@ namespace BACKWARD
 		float4* dL_dconic2D,
 		float* dL_dopacity,
 		float* dL_dcolors,
+		float* dL_dembeddings,
 		float* dL_dsemantics);
 
 	void preprocess(
